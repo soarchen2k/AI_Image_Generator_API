@@ -35,8 +35,8 @@
 1. 只有用户明确要求生图时才调用 `POST /v1/images/generations`；检查、说明、整理工作流时不启动服务。提交前先说明工作流、请求参数和目标 ComfyUI 地址。此接口只使用 `workflows/txt2img/qwen-image-2.1.json`。
 2. API 默认地址为 `http://127.0.0.1:8190`，路由为 `POST /v1/images/generations`。请求体为 JSON，必须带非空 `prompt`。未提供的其他字段保留工作流默认值；每个生图任务都要显式提供用户要求的提示词，不能使用工作流内保存的示例提示词。
 3. 可调用字段：`negative_prompt`、`aspect_ratio`、`megapixels`、`multiple`、`resolution`、`n`、`batch_size`、`seed`、`steps`、`cfg`、`sampler_name`、`scheduler`、`denoise`、`unet_name`、`weight_dtype`、`clip_name`、`clip_type`、`clip_device`、`vae_name`、`filename_prefix`、`format`、`bit_depth`、`input_color_space`、`model`、`response_format`。`n` 与 `batch_size` 不能同时传；`seed=-1` 表示随机；`model` 固定为 `qwen-image-2.1`；`response_format` 为 `b64_json`（默认）或 `url`。`width` / `height` 是链接计算值，不可直接设置。选项和数值边界以 ComfyUI 当前节点定义为准，格式子选项必须匹配所选 `format`。
-4. 服务默认读取 `config/comfyui.env`，在本机 `127.0.0.1:8190` 监听。仅在用户授权的生图任务开始时检查端口；端口空闲才启动。用 PowerShell `Start-Process` 启动时必须带 `-WindowStyle Hidden -PassThru`，把确切 PID 记录到 `Z:\TEMP\comfyui\image-api.pid`，等端口监听后才发送请求。详细命令见 `README.md`。
-5. 一项任务内需要多次请求时复用该实例；所有请求完成后，从 PID 文件读取并核对进程命令行确实属于本项目 API，再停止它并删除该 PID 文件，确认进程退出和端口释放。前台启动则在原终端按 Ctrl+C。不得按 `python` 进程名批量结束进程；若端口原本已被占用，不重复启动，也不停止来源不明的实例。
+4. 服务默认读取 `config/comfyui.env`，在本机 `127.0.0.1:8190` 监听。仅在用户授权的生图任务开始时检查端口；端口空闲才启动。用 PowerShell `Start-Process` 启动时必须带 `-WindowStyle Hidden -PassThru`，把确切 PID 记录到临时目录下的 `comfyui\image-api.pid`：优先使用已存在的 `Z:\Temp`；没有时从项目根目录创建并使用 `tmp\comfyui\image-api.pid`。等由该 PID 所有的端口监听后才发送请求。详细命令见 `README.md`。
+5. 一项任务内需要多次请求时复用该实例；所有请求完成后，从 PID 文件读取并核对进程命令行包含本项目 API 脚本的绝对路径，再停止它并删除该 PID 文件，确认进程退出和端口释放。启动和停止命令都从项目根目录运行。前台启动则在原终端按 Ctrl+C。不得按 `python` 进程名批量结束进程；若端口原本已被占用，不重复启动，也不停止来源不明的实例。
 6. API 生图是同步请求，默认最长等待 1800 秒；结果写入 `COMFYUI_OUTPUT_DIR` 指定的目录（生图前把它指向当前工作目录下本次主题的子目录），响应默认包含 base64 图片。504 表示等待超时且 ComfyUI 任务可能仍在运行；先检查 ComfyUI 队列，不得盲目重提。结束本次调用后关闭由本任务启动的包装 API；关闭包装 API 不会关闭 ComfyUI 主服务。
 7. 默认仅本机可访问。非回环绑定必须配置独立的 `COMFYUI_IMAGE_API_TOKEN`；客户端使用 `Authorization: Bearer <token>`。绑定 `0.0.0.0` 并返回 URL 时还需配置 `COMFYUI_IMAGE_API_PUBLIC_URL`。不要输出或提交 token。
 
@@ -47,8 +47,8 @@
 
 ## 临时文件
 
-- `Z:\TEMP` 只作为临时文件的输出目录：一次性脚本、测试、调试文件、日志、PID 文件、中间产物和临时下载都放这里，用完即弃。
-- 出图成品不留在 `Z:\TEMP`；生成结果按「输出目录与主题子目录」的约定落到当前工作目录的主题子目录。
+- 临时文件优先放入已存在的 `Z:\Temp`；该目录不存在时，从项目根目录创建并使用 `.\tmp`。一次性脚本、测试、调试文件、日志、PID 文件、中间产物和临时下载都放在选定的临时目录，用完即弃。
+- `tmp/` 是本地临时目录并已加入 Git 忽略规则。出图成品不留在临时目录；生成结果按「输出目录与主题子目录」的约定落到当前工作目录的主题子目录。
 - 不要在项目源文件目录（`workflows/`、`tools/`、`config/`）中创建缓存、临时下载、测试结果或运行日志。
 
 ## API 与配置

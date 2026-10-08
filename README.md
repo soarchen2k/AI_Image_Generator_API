@@ -1,6 +1,6 @@
 # AI 图片与 ComfyUI
 
-这里存放供 Codex 调用 ComfyUI API 的 API Format 工作流和客户端。生成结果默认写入运行命令时的**当前工作目录**；每开一个新主题，就在工作目录下建一个主题子目录 `<当前工作目录>\<主题>\`，并把 `COMFYUI_OUTPUT_DIR` 指向它。`Z:\TEMP` 只用于临时文件。
+这里存放供 Codex 调用 ComfyUI API 的 API Format 工作流和客户端。生成结果默认写入运行命令时的**当前工作目录**；每开一个新主题，就在工作目录下建一个主题子目录 `<当前工作目录>\<主题>\`，并把 `COMFYUI_OUTPUT_DIR` 指向它。临时文件优先放入已存在的 `Z:\Temp`；该目录不存在时，在当前工作目录创建并使用 `tmp/`。
 
 ## 独立生图 API
 
@@ -83,25 +83,56 @@ PowerShell 示例：
     $listener = Get-NetTCPConnection -State Listen -LocalPort 8190 -ErrorAction SilentlyContinue
     if ($listener) { throw "Port 8190 is already in use; inspect its owner before proceeding." }
 
-端口空闲时，在项目根目录运行以下 PowerShell 命令。它在隐藏窗口启动服务，并把 PID 记在项目外的临时目录，便于模型跨命令调用后准确关闭。启动前先把 `COMFYUI_OUTPUT_DIR` 设成本次主题的输出目录（绝对路径），`Start-Process` 启动的子进程会继承该变量；不设置则按服务进程的工作目录输出：
+端口空闲时，在项目根目录运行以下 PowerShell 命令。它在隐藏窗口启动服务，并把 PID 记在临时目录，便于模型跨命令调用后准确关闭。`Z:\Temp` 已存在时使用 `Z:\Temp\comfyui`；否则创建并使用项目根目录下的 `tmp\comfyui`。启动和停止命令都要从项目根目录运行。启动前先把 `COMFYUI_OUTPUT_DIR` 设成本次主题的输出目录（绝对路径），`Start-Process` 启动的子进程会继承该变量；不设置则按服务进程的工作目录输出：
 
     $env:COMFYUI_OUTPUT_DIR = "<当前工作目录>\<主题>"
-    $pidFile = "Z:\TEMP\comfyui\image-api.pid"
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $pidFile) | Out-Null
-    $apiProcess = Start-Process -FilePath (Get-Command python).Source -ArgumentList "tools\comfyui_image_api.py" -WorkingDirectory (Get-Location).Path -WindowStyle Hidden -PassThru
+    $projectRoot = (Get-Location).Path
+    $tempRoot = if (Test-Path -LiteralPath 'Z:\Temp' -PathType Container) { 'Z:\Temp' } else { Join-Path $projectRoot 'tmp' }
+    $pidDirectory = Join-Path $tempRoot 'comfyui'
+    New-Item -ItemType Directory -Force -Path $pidDirectory | Out-Null
+    $pidFile = Join-Path $pidDirectory 'image-api.pid'
+    if (Test-Path -LiteralPath $pidFile) { throw "PID file already exists; inspect it before starting another instance." }
+    $apiScript = Join-Path $projectRoot 'tools\comfyui_image_api.py'
+    $python = (Get-Command python -ErrorAction Stop).Source
+    $apiProcess = Start-Process -FilePath $python -ArgumentList @("`"$apiScript`"") -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru
     $apiPid = $apiProcess.Id
-    Set-Content -LiteralPath $pidFile -Value $apiPid -NoNewline
-    Get-NetTCPConnection -State Listen -LocalPort 8190
+    try { Set-Content -LiteralPath $pidFile -Value $apiPid -NoNewline -ErrorAction Stop }
+    catch { Stop-Process -Id $apiPid -ErrorAction SilentlyContinue; throw }
+    $deadline = (Get-Date).AddSeconds(60)
+    $listener = $null
+    do {
+        $apiProcess.Refresh()
+        if ($apiProcess.HasExited) { Remove-Item -LiteralPath $pidFile; throw "The image API process exited before it began listening." }
+        $listener = Get-NetTCPConnection -State Listen -LocalPort 8190 -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -eq $apiPid }
+        if ($listener) { break }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    if (-not $listener) {
+        Stop-Process -Id $apiPid -ErrorAction SilentlyContinue
+        Wait-Process -Id $apiPid -Timeout 10 -ErrorAction SilentlyContinue
+        if (Get-CimInstance Win32_Process -Filter "ProcessId = $apiPid") { throw "The API did not listen within 60 seconds; its PID file was kept for inspection." }
+        Remove-Item -LiteralPath $pidFile
+        throw "The image API did not begin listening within 60 seconds."
+    }
 
 等到本机端口开始监听后再发送生图请求。完成当前任务的所有 API 请求后，读取 PID 文件并确认它确实属于本项目的 API，再停止：
 
-    $pidFile = "Z:\TEMP\comfyui\image-api.pid"
-    $apiPid = [int](Get-Content -LiteralPath $pidFile)
+    $projectRoot = (Get-Location).Path
+    $pidCandidates = @('Z:\Temp\comfyui\image-api.pid', (Join-Path $projectRoot 'tmp\comfyui\image-api.pid')) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+    if ($pidCandidates.Count -ne 1) { throw "Expected exactly one image API PID file across Z:\Temp and .\tmp; inspect both locations." }
+    $pidFile = $pidCandidates[0]
+    $rawPid = (Get-Content -LiteralPath $pidFile -Raw).Trim()
+    if ($rawPid -notmatch '^\d+$') { throw "The image API PID file does not contain a valid process ID." }
+    $apiPid = [int]$rawPid
+    $apiScript = Join-Path $projectRoot 'tools\comfyui_image_api.py'
     $apiProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $apiPid"
-    if (-not $apiProcess -or $apiProcess.CommandLine -notmatch "comfyui_image_api\.py") { throw "PID does not match the ComfyUI image API." }
+    if (-not $apiProcess -or -not $apiProcess.CommandLine -or $apiProcess.CommandLine.IndexOf($apiScript, [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw "PID does not match this project's ComfyUI image API script." }
     Stop-Process -Id $apiPid
+    Wait-Process -Id $apiPid -Timeout 15 -ErrorAction SilentlyContinue
+    if (Get-CimInstance Win32_Process -Filter "ProcessId = $apiPid") { throw "The image API process is still running; PID file was kept." }
     Remove-Item -LiteralPath $pidFile
-    Get-NetTCPConnection -State Listen -LocalPort 8190 -ErrorAction SilentlyContinue
+    $listener = Get-NetTCPConnection -State Listen -LocalPort 8190 -ErrorAction SilentlyContinue
+    if ($listener) { throw "Port 8190 is still occupied; inspect its owner before taking further action." }
 
 确认该 PID 已退出、端口已释放。不要用按进程名结束所有 Python 的方式停止服务。若服务在前台运行，回到启动它的终端按 Ctrl+C。API 超时后不要盲目重提；记录 ComfyUI 队列状态，结束本次调用后仍要关闭本任务启动的包装服务。ComfyUI 主服务由用户管理，关闭包装 API 不会关闭 ComfyUI。
 
@@ -130,7 +161,7 @@ python tools\comfyui_client.py run workflows\txt2img\flux.json
 - 出图根目录是运行命令时的当前工作目录（通常就是本项目目录），生成结果放在它的主题子目录 `<当前工作目录>\<主题>\`。
 - 每开一个新主题就新建一个主题子目录，同一主题复用；目录名简短可读，不含 Windows 保留字符与保留名。
 - 输出位置优先级：进程环境变量 `COMFYUI_OUTPUT_DIR` > `config/comfyui.env` 中的同名项 > 运行时的当前工作目录。
-- `Z:\TEMP` 只放临时文件：一次性脚本、测试、调试文件、日志、PID 文件、中间产物和临时下载。出图成品不留在这里。
+- 临时文件优先放入已存在的 `Z:\Temp`；该目录不存在时，在当前工作目录创建并使用 `tmp/`。一次性脚本、测试、调试文件、日志、PID 文件、中间产物和临时下载都放在选定的临时目录。出图成品不留在这里；`tmp/` 已加入 Git 忽略规则。
 - 不要在 `workflows/`、`tools/`、`config/` 等源文件目录里创建缓存、临时下载、测试结果或运行日志。
 
 客户端只依赖 Python 标准库。`status`、`inspect`、`run` 均输出 JSON，便于查看或由其他工具处理。
