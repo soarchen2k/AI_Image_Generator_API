@@ -1,0 +1,11 @@
+# Local credentials and machine-specific settings
+config/comfyui.env
+.env
+.env.*
+!.env.example
+
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
